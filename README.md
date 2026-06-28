@@ -1,6 +1,8 @@
 # wiki-sync
 
-把 Claude Code、Codex、ChatGPT 的对话，自动同步进你 [LLM-WIKI](https://github.com/stello-agent) 知识库的 `raw/`，喂给它的 **ingest 工作流**。
+> **让你和各个 AI 聊出来的零碎思路，自动沉淀成结构化的项目知识。**
+
+把 Claude Code、Codex、ChatGPT 的对话，持续同步进 [LLM-WIKI](https://github.com/stello-agent) 知识库的 `raw/`，交给它的 **ingest 工作流**自动编排——分散在各个对话里的结论与改动点，从此源源不断汇入你的项目知识管理，而不是聊完就散。
 
 ## 它的意义
 
