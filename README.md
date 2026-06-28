@@ -1,10 +1,22 @@
 # wiki-sync
 
-把 Claude Code、Codex、ChatGPT 的对话记录，一键导入 Obsidian [LLM-WIKI](https://github.com/stello-agent) 知识库。
+把 Claude Code、Codex、ChatGPT 的对话，自动同步进你 [LLM-WIKI](https://github.com/stello-agent) 知识库的 `raw/`，喂给它的 **ingest 工作流**。
 
-和 AI 聊完天，对话就躺在本地某个目录的 JSONL 文件里，想找找不到、想回顾也不方便。`wiki-sync` 把这步自动化：扫描你的对话，自动提取摘要，转成符合 LLM-WIKI 规范的 Markdown 页面，存进你的 Obsidian vault。还能挂上 Claude Code 的钩子，对话结束自动同步。
+## 它的意义
 
-零依赖，只用 Python 标准库，macOS 自带 Python 即可运行。
+你在好几个项目里来回跑，天天跟不同的 AI 聊产品思路、改代码、定方案。这些**零碎的知识和修改点**，散落在一个个聊天窗口里，关掉就找不回——PRD、设计文档永远追不上真实的讨论。
+
+LLM-WIKI 有个工作流叫 **ingest**：它会把 `raw/` 里零散的素材自动编排、归纳进结构化的 wiki。
+
+`wiki-sync` 做的，就是把你和各个 AI 的对话**持续灌进 `raw/`**，成为 ingest 的原料。于是：
+
+> 散落在各个 AI 对话里的零碎结论、思路、改动点 → 自动汇流进 `raw/` → 经 ingest 编排进 wiki → 沉淀成可检索、可演进的项目知识。
+
+不再是"聊完就散"，而是每一次和 AI 的协作，都自动并入你的项目知识管理。
+
+## 怎么做到的
+
+在你常用的 AI 工具里装一次，之后每次聊完，对话会自动同步进 `raw/wiki-sync-<来源>/`：自动提取摘要、按来源归档、保留全文。完全本地，开源，零依赖（只用 Python 标准库，macOS 自带即可运行）。
 
 ## 使用前提
 
