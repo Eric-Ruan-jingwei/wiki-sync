@@ -6,21 +6,49 @@
 
 零依赖，只用 Python 标准库，macOS 自带 Python 即可运行。
 
+## 使用前提
+
+1. **一台 Mac**（自带 Python 3，开箱即用）。
+2. **Obsidian**，并且有一个用来存对话的"知识库"（vault）——其实就是一个文件夹。
+   - 已经有 LLM-WIKI 知识库？直接用。
+   - 没有也没关系，装好后一条命令就能建一个（见下方「第一次用」）。
+
+> 这里的"知识库"对 wiki-sync 来说，就是一个含 `.llm-wiki/` 标记的文件夹。`wiki-sync init` 会帮你建好。
+
 ## 安装
 
-```bash
-# 在项目目录里
-sh install.sh
+一键安装（推荐，新用户用这个，不用 clone 仓库）：
 
-# 或一键远程安装
+```bash
 curl -sSL https://raw.githubusercontent.com/Eric-Ruan-jingwei/wiki-sync/main/install.sh | sh
 ```
 
-如果提示 `~/.local/bin` 不在 PATH 里，在 `~/.zshrc` 加一行后重开终端：
+或者你已经 clone 了本仓库，在项目目录里：
+
+```bash
+sh install.sh
+```
+
+如果安装后提示 `command not found`，运行 `source ~/.zshrc` 再试；仍不行就在 `~/.zshrc` 末尾加一行后重开终端：
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
+
+## 第一次用（三步）
+
+```bash
+# 1) 还没有知识库？建一个（已有则跳过这步）
+wiki-sync init
+
+# 2) 装进你正在用的 agent（在 Claude Code / Codex 的终端里跑）
+wiki-sync install
+
+# 3) 把以前的对话先导进来
+wiki-sync
+```
+
+之后正常聊天即可，聊完自动同步。装好后建议重开一次 agent 让自动同步生效。
 
 ## 用法
 

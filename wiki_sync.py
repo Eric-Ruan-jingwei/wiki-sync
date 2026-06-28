@@ -1052,6 +1052,36 @@ def cmd_where(args):
     print(f"✅ 知识库路径已设为: {p}")
 
 
+def cmd_init(args):
+    """新建一个空的知识库（给还没有 LLM-WIKI 的用户）。"""
+    if args.path:
+        vault = Path(args.path).expanduser().resolve()
+    else:
+        vault = Path.home() / "Documents" / "我的AI对话知识库"
+
+    if (vault / ".llm-wiki").is_dir():
+        print(f"这里已经是一个知识库了：{vault}")
+    else:
+        (vault / ".llm-wiki").mkdir(parents=True, exist_ok=True)
+        (vault / "raw").mkdir(parents=True, exist_ok=True)
+        (vault / "wiki").mkdir(parents=True, exist_ok=True)
+        log = vault / "wiki" / "log.md"
+        if not log.exists():
+            log.write_text("# Research Log\n", encoding="utf-8")
+        marker = vault / ".llm-wiki" / "project.json"
+        if not marker.exists():
+            marker.write_text(json.dumps(
+                {"createdBy": "wiki-sync", "createdAt": datetime.now().isoformat()},
+                ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"✅ 已新建知识库：{vault}")
+
+    cfg = load_config()
+    cfg["vault"] = str(vault)
+    save_config(cfg)
+    print("   已设为默认知识库。")
+    print("   用 Obsidian 打开这个文件夹即可（「打开文件夹作为仓库」）。")
+
+
 def cmd_config(args):
     cfg = load_config()
     changed = False
@@ -1157,6 +1187,10 @@ def _main_cli():
     p_list.add_argument("--source", default="all", help="只看某个来源")
     p_list.add_argument("--file", help="ChatGPT 等导出文件路径")
     p_list.set_defaults(func=cmd_list)
+
+    p_init = sub.add_parser("init", help="新建一个空知识库（还没有 LLM-WIKI 时用）")
+    p_init.add_argument("path", nargs="?", help="放在哪里（默认 ~/Documents/我的AI对话知识库）")
+    p_init.set_defaults(func=cmd_init)
 
     p_where = sub.add_parser("where", help="查看/设置知识库位置：where 或 where <路径>")
     p_where.add_argument("path", nargs="?", help="LLM-WIKI 知识库（vault）路径")
