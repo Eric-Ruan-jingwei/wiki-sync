@@ -91,14 +91,9 @@ def save_config(cfg):
 
 
 def is_vault(p):
-    """判断一个文件夹是不是可用的知识库：
-    有 .llm-wiki 标记，或是一个含 raw 文件夹的 Obsidian 仓库（含 .obsidian）。"""
+    """判断一个文件夹是不是可用的知识库：含 raw 文件夹的 Obsidian 仓库（有 .obsidian）。"""
     p = Path(p)
-    if (p / ".llm-wiki").is_dir():
-        return True
-    if (p / ".obsidian").is_dir() and (p / "raw").is_dir():
-        return True
-    return False
+    return (p / ".obsidian").is_dir() and (p / "raw").is_dir()
 
 
 def scan_vaults():
@@ -113,8 +108,8 @@ def scan_vaults():
     for root in search_roots:
         if not root.is_dir():
             continue
-        # 以 raw 文件夹为线索：含 raw 的 Obsidian 仓库 / LLM-WIKI 库
-        for marker in list(root.glob("**/.llm-wiki")) + list(root.glob("**/raw")):
+        # 以 raw 文件夹为线索：找含 raw 的 Obsidian 仓库
+        for marker in root.glob("**/raw"):
             vault = marker.parent
             if len(vault.relative_to(root).parts) > 4:
                 continue
@@ -615,8 +610,13 @@ def build_conversation_markdown(conv):
 # 写入 vault
 # ---------------------------------------------------------------------------
 
+def _imported_path(vault):
+    # 去重记录放在 wiki-sync 自己的目录，不往用户库里塞 .llm-wiki
+    return vault / ".wiki-sync" / "imported.json"
+
+
 def load_imported(vault):
-    f = vault / ".llm-wiki" / "wiki-sync-imported.json"
+    f = _imported_path(vault)
     if f.exists():
         try:
             return json.loads(f.read_text(encoding="utf-8"))
@@ -626,7 +626,7 @@ def load_imported(vault):
 
 
 def save_imported(vault, data):
-    f = vault / ".llm-wiki" / "wiki-sync-imported.json"
+    f = _imported_path(vault)
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -634,23 +634,6 @@ def save_imported(vault, data):
 def source_folder(vault, source):
     """每个 agent 在 raw/ 下独立一个文件夹：raw/wiki-sync-<source>/。"""
     return vault / "raw" / f"wiki-sync-{source}"
-
-
-def rebuild_folder_index(vault, source):
-    """重建某个 agent 文件夹的 _index.md（列出该 agent 的全部对话）。"""
-    folder = source_folder(vault, source)
-    label = source_label(source)
-    imported = load_imported(vault)
-    rows = [v for v in imported.values() if v.get("source") == source]
-    rows.sort(key=lambda v: v.get("importedAt", ""), reverse=True)
-
-    lines = [f"# {label} 对话存档", "",
-             f"由 wiki-sync 自动维护，共 {len(rows)} 个对话。", ""]
-    for v in rows:
-        slug = v.get("slug") or v.get("wikiSlug", "")
-        lines.append(f"- [[{slug}]] — {v.get('title', slug)}")
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "_index.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def update_log(vault, source, title):
@@ -702,7 +685,6 @@ def import_conversation(vault, conv, force=False):
         "importedAt": datetime.now().isoformat(),
     }
     save_imported(vault, imported)
-    rebuild_folder_index(vault, conv["source"])
     if is_new:        # 同一对话反复更新（force）时不重复记日志
         update_log(vault, conv["source"], title)
     return "ok", f"已导入: {title}"
@@ -1128,8 +1110,10 @@ def cmd_where(args):
             print(f"（手动设置的路径: {cfg['vault']}）")
         return
     p = Path(args.path).expanduser().resolve()
-    if not (p / ".llm-wiki").is_dir():
-        print(f"⚠ 提醒：{p} 下没有 .llm-wiki 目录，可能不是 LLM-WIKI 知识库。仍已记录。")
+    if not p.is_dir():
+        print(f"⚠ 提醒：{p} 不存在或不是文件夹。仍已记录。")
+    elif not (p / ".obsidian").is_dir():
+        print(f"⚠ 提醒：{p} 看起来不是 Obsidian 仓库（没有 .obsidian）。仍已记录。")
     cfg = load_config()
     cfg["vault"] = str(p)
     save_config(cfg)
@@ -1199,8 +1183,6 @@ def cmd_config(args):
     changed = False
     if args.vault:
         p = Path(args.vault).expanduser().resolve()
-        if not (p / ".llm-wiki").is_dir():
-            print(f"⚠ 警告：{p} 下没有 .llm-wiki 目录，可能不是有效的 LLM-WIKI vault。")
         cfg["vault"] = str(p)
         changed = True
         print(f"✅ 已设置 vault 路径: {p}")

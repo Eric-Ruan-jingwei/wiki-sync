@@ -143,13 +143,12 @@ wiki-sync source remove opencode
 你的 vault/
 ├── raw/
 │   ├── wiki-sync-claude/
-│   │   ├── claude-<标题>.md      # 一个对话一个文件（frontmatter + 摘要 + 全文）
-│   │   └── _index.md            # 该 agent 的对话目录
+│   │   └── claude-<标题>.md      # 一个对话一个文件（frontmatter + 摘要 + 全文）
 │   ├── wiki-sync-codex/
 │   │   └── ...
 │   └── wiki-sync-opencode/      # 自定义 agent 也各自一个文件夹
-├── wiki/log.md                  # 追加导入日志（LLM-WIKI 的活动日志）
-└── .llm-wiki/wiki-sync-imported.json   # 已导入记录（去重用）
+├── wiki/log.md                  # 若你的库有 wiki/，追加一条导入日志
+└── .wiki-sync/imported.json     # wiki-sync 自己的去重记录（不碰你的库结构）
 ```
 
 每个 md 文件含 YAML frontmatter + 自动提取的摘要（目标 + 结果 + 规模）+ 完整对话原文，符合 LLM-WIKI 的 `source` schema，可在 Obsidian 里双链引用。
