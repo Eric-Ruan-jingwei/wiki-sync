@@ -9,11 +9,9 @@
 ## 使用前提
 
 1. **一台 Mac**（自带 Python 3，开箱即用）。
-2. **Obsidian**，并且有一个用来存对话的"知识库"（vault）——其实就是一个文件夹。
-   - 已经有 LLM-WIKI 知识库？直接用。
-   - 没有也没关系，装好后一条命令就能建一个（见下方「第一次用」）。
+2. **Obsidian**，并且有一个 LLM-WIKI 知识库（带 `raw` 文件夹的 Obsidian 仓库）。
 
-> 这里的"知识库"对 wiki-sync 来说，就是一个含 `.llm-wiki/` 标记的文件夹。`wiki-sync init` 会帮你建好。
+> wiki-sync 会自动检索本地、找到这个知识库，你不用手动填路径。
 
 ## 安装
 
@@ -38,8 +36,8 @@ export PATH="$HOME/.local/bin:$PATH"
 ## 第一次用（三步）
 
 ```bash
-# 1) 还没有知识库？建一个（已有则跳过这步）
-wiki-sync init
+# 1) 自动找到你的 Obsidian 知识库
+wiki-sync detect
 
 # 2) 装进你正在用的 agent（在 Claude Code / Codex 的终端里跑）
 wiki-sync install
@@ -49,6 +47,9 @@ wiki-sync
 ```
 
 之后正常聊天即可，聊完自动同步。装好后建议重开一次 agent 让自动同步生效。
+
+> `detect` 会在 `~/Documents`、`~/Desktop`、`~/` 下找含 `raw` 文件夹的 Obsidian 库，
+> 带 `.llm-wiki` 标记的优先。找到多个会列出来，自动选第一个；不对就用 `wiki-sync where <路径>` 换。
 
 ## 用法
 
@@ -86,9 +87,10 @@ wiki-sync list     # 先看看有哪些对话
 
 ### 知识库位置
 
-vault 路径默认自动搜索（在 `~/Documents`、`~/Desktop`、`~/` 下找含 `.llm-wiki` 目录的文件夹）。找不到或想换：
+wiki-sync 会自动检索本地知识库（含 `raw` 文件夹的 Obsidian 库，`.llm-wiki` 标记的优先）。相关命令：
 
 ```bash
+wiki-sync detect              # 扫描本地、列出候选并设为默认
 wiki-sync where               # 看当前用的是哪个知识库
 wiki-sync where <vault 路径>   # 手动指定
 ```

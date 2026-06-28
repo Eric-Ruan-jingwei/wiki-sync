@@ -90,26 +90,50 @@ def save_config(cfg):
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def find_vault():
-    """找到 LLM-WIKI vault：优先用配置，否则自动搜索常见位置。"""
-    cfg = load_config()
-    if cfg.get("vault"):
-        p = Path(cfg["vault"]).expanduser()
-        if (p / ".llm-wiki").is_dir():
-            return p
+def is_vault(p):
+    """判断一个文件夹是不是可用的知识库：
+    有 .llm-wiki 标记，或是一个含 raw 文件夹的 Obsidian 仓库（含 .obsidian）。"""
+    p = Path(p)
+    if (p / ".llm-wiki").is_dir():
+        return True
+    if (p / ".obsidian").is_dir() and (p / "raw").is_dir():
+        return True
+    return False
 
+
+def scan_vaults():
+    """扫描本地常见位置，返回所有候选知识库路径（去重、按路径排序）。"""
     search_roots = [
         Path.home() / "Documents",
         Path.home() / "Desktop",
         Path.home(),
     ]
+    found = []
+    seen = set()
     for root in search_roots:
         if not root.is_dir():
             continue
-        for llm_wiki in root.glob("**/.llm-wiki"):
-            if len(llm_wiki.relative_to(root).parts) <= 4:
-                return llm_wiki.parent
-    return None
+        # 以 raw 文件夹为线索：含 raw 的 Obsidian 仓库 / LLM-WIKI 库
+        for marker in list(root.glob("**/.llm-wiki")) + list(root.glob("**/raw")):
+            vault = marker.parent
+            if len(vault.relative_to(root).parts) > 4:
+                continue
+            if is_vault(vault) and vault not in seen:
+                seen.add(vault)
+                found.append(vault)
+    # 带 .llm-wiki 标记的（真正的 LLM-WIKI 知识库）优先排在前面
+    return sorted(found, key=lambda p: (not (p / ".llm-wiki").is_dir(), str(p)))
+
+
+def find_vault():
+    """找到知识库：优先用配置里手动指定的，否则自动扫描，取第一个候选。"""
+    cfg = load_config()
+    if cfg.get("vault"):
+        p = Path(cfg["vault"]).expanduser()
+        if is_vault(p):
+            return p
+    candidates = scan_vaults()
+    return candidates[0] if candidates else None
 
 
 # ---------------------------------------------------------------------------
@@ -974,8 +998,9 @@ def cmd_list(args):
 def _require_vault():
     vault = find_vault()
     if not vault:
-        print("⚠ 找不到 LLM-WIKI 知识库（Obsidian vault）。")
-        print("请先告诉我它在哪：wiki-sync where <你的 vault 路径>")
+        print("⚠ 还没找到你的 Obsidian 知识库。")
+        print("  试试自动检索： wiki-sync detect")
+        print("  或手动指定：   wiki-sync where <知识库路径>")
         sys.exit(1)
     return vault
 
@@ -1052,34 +1077,27 @@ def cmd_where(args):
     print(f"✅ 知识库路径已设为: {p}")
 
 
-def cmd_init(args):
-    """新建一个空的知识库（给还没有 LLM-WIKI 的用户）。"""
-    if args.path:
-        vault = Path(args.path).expanduser().resolve()
-    else:
-        vault = Path.home() / "Documents" / "我的AI对话知识库"
-
-    if (vault / ".llm-wiki").is_dir():
-        print(f"这里已经是一个知识库了：{vault}")
-    else:
-        (vault / ".llm-wiki").mkdir(parents=True, exist_ok=True)
-        (vault / "raw").mkdir(parents=True, exist_ok=True)
-        (vault / "wiki").mkdir(parents=True, exist_ok=True)
-        log = vault / "wiki" / "log.md"
-        if not log.exists():
-            log.write_text("# Research Log\n", encoding="utf-8")
-        marker = vault / ".llm-wiki" / "project.json"
-        if not marker.exists():
-            marker.write_text(json.dumps(
-                {"createdBy": "wiki-sync", "createdAt": datetime.now().isoformat()},
-                ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"✅ 已新建知识库：{vault}")
-
+def cmd_detect(args):
+    """扫描本地，找出你的 Obsidian 知识库（含 raw 文件夹的库）并设为默认。"""
     cfg = load_config()
-    cfg["vault"] = str(vault)
+    candidates = scan_vaults()
+    if not candidates:
+        print("没在本地找到知识库。")
+        print("（会在 ~/Documents、~/Desktop、~/ 下找含 raw 文件夹的 Obsidian 库）")
+        print("找到了但没被识别？手动指定：wiki-sync where <知识库路径>")
+        return
+
+    print(f"找到 {len(candidates)} 个候选知识库：\n")
+    for i, v in enumerate(candidates, 1):
+        tag = " （LLM-WIKI）" if (v / ".llm-wiki").is_dir() else ""
+        print(f"  {i}. {v}{tag}")
+
+    chosen = candidates[0]
+    cfg["vault"] = str(chosen)
     save_config(cfg)
-    print("   已设为默认知识库。")
-    print("   用 Obsidian 打开这个文件夹即可（「打开文件夹作为仓库」）。")
+    print(f"\n✅ 已设为默认：{chosen}")
+    if len(candidates) > 1:
+        print("   不是这个？换一个：wiki-sync where <上面列出的路径>")
 
 
 def cmd_config(args):
@@ -1188,9 +1206,8 @@ def _main_cli():
     p_list.add_argument("--file", help="ChatGPT 等导出文件路径")
     p_list.set_defaults(func=cmd_list)
 
-    p_init = sub.add_parser("init", help="新建一个空知识库（还没有 LLM-WIKI 时用）")
-    p_init.add_argument("path", nargs="?", help="放在哪里（默认 ~/Documents/我的AI对话知识库）")
-    p_init.set_defaults(func=cmd_init)
+    p_detect = sub.add_parser("detect", help="自动检索本地，找到你的 Obsidian 知识库并设为默认")
+    p_detect.set_defaults(func=cmd_detect)
 
     p_where = sub.add_parser("where", help="查看/设置知识库位置：where 或 where <路径>")
     p_where.add_argument("path", nargs="?", help="LLM-WIKI 知识库（vault）路径")
