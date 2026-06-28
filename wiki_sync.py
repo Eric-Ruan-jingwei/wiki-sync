@@ -121,19 +121,19 @@ def scan_vaults():
             if is_vault(vault) and vault not in seen:
                 seen.add(vault)
                 found.append(vault)
-    # 带 .llm-wiki 标记的（真正的 LLM-WIKI 知识库）优先排在前面
-    return sorted(found, key=lambda p: (not (p / ".llm-wiki").is_dir(), str(p)))
+    return sorted(found, key=lambda p: str(p))
 
 
 def find_vault():
-    """找到知识库：优先用配置里手动指定的，否则自动扫描，取第一个候选。"""
+    """找到知识库：优先用配置里指定的；没配置时只在「唯一候选」才自动用，
+    有多个就不猜——交给用户用 wiki-sync detect 选。"""
     cfg = load_config()
     if cfg.get("vault"):
         p = Path(cfg["vault"]).expanduser()
         if is_vault(p):
             return p
     candidates = scan_vaults()
-    return candidates[0] if candidates else None
+    return candidates[0] if len(candidates) == 1 else None
 
 
 # ---------------------------------------------------------------------------
@@ -1059,6 +1059,65 @@ def cmd_import(args):
     _run_import(vault, targets, force=args.force)
 
 
+def _ask_yes(prompt, default=True):
+    """问一个 是/否。非交互环境（无终端）下直接返回默认值。"""
+    if not sys.stdin.isatty():
+        return default
+    suffix = " [Y/n] " if default else " [y/N] "
+    try:
+        ans = input(prompt + suffix).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if not ans:
+        return default
+    return ans in ("y", "yes", "是", "好")
+
+
+def cmd_setup(args):
+    """新手指引：手把手走完 找知识库 → 装进 agent → 导入历史。"""
+    print("👋 欢迎使用 wiki-sync —— 把 AI 对话自动存进你的 Obsidian 知识库。\n")
+    print("这就带你走一遍，三步搞定。\n")
+
+    # 第 1 步：知识库（列出来让用户选）
+    print("── 第 1 步 / 共 3 步：选择你的知识库 ──")
+    vault = find_vault()  # 已配置或唯一候选时直接用
+    if vault:
+        print(f"✅ 用这个知识库：{vault}")
+    else:
+        vault = choose_vault()
+        if not vault:
+            print("\n没选知识库，先到这。准备好后再跑 wiki-sync setup。")
+            return
+
+    # 第 2 步：装进当前 agent
+    print("\n── 第 2 步 / 共 3 步：装进你正在用的 agent ──")
+    agent = detect_agent()
+    if agent:
+        label = "Claude Code" if agent == "claude" else "Codex"
+        if _ask_yes(f"检测到你在 {label} 里，现在装进去（聊完自动同步）？"):
+            cmd_install(argparse.Namespace(agent=agent))
+        else:
+            print("  跳过。以后随时可以 wiki-sync install。")
+    else:
+        print("没认出当前 agent。在你用的 agent 终端里手动跑：")
+        print("  wiki-sync install claude    # Claude Code")
+        print("  wiki-sync install codex     # Codex")
+
+    # 第 3 步：导入历史
+    print("\n── 第 3 步 / 共 3 步：把以前的对话导进来 ──")
+    if vault and _ask_yes("现在把历史对话一次性导入吗？"):
+        print()
+        cmd_sync(args)
+    else:
+        print("  跳过。以后随时可以直接运行 wiki-sync 来导入。")
+
+    # 收尾
+    print("\n🎉 设置完成！以后正常聊天就行，聊完会自动存进知识库。")
+    print("   （装好后建议重开一次 agent 让自动同步生效）")
+    print("   想看全部命令：wiki-sync --help")
+
+
 def cmd_where(args):
     """查看或设置知识库（vault）路径。"""
     if not args.path:
@@ -1077,27 +1136,62 @@ def cmd_where(args):
     print(f"✅ 知识库路径已设为: {p}")
 
 
-def cmd_detect(args):
-    """扫描本地，找出你的 Obsidian 知识库（含 raw 文件夹的库）并设为默认。"""
-    cfg = load_config()
+def _vault_note_count(v):
+    """大致数一下一个库里有多少篇笔记（帮用户认出哪个是常用的那个）。"""
+    try:
+        n = 0
+        for p in Path(v).rglob("*.md"):
+            if "wiki-sync-" in str(p):  # 不算我们自己导入的
+                continue
+            n += 1
+            if n >= 9999:
+                break
+        return n
+    except OSError:
+        return 0
+
+
+def choose_vault():
+    """列出本地所有 Obsidian 知识库，让用户选一个，设为默认。返回选中的路径或 None。"""
     candidates = scan_vaults()
     if not candidates:
-        print("没在本地找到知识库。")
-        print("（会在 ~/Documents、~/Desktop、~/ 下找含 raw 文件夹的 Obsidian 库）")
-        print("找到了但没被识别？手动指定：wiki-sync where <知识库路径>")
-        return
+        print("没在本地找到 Obsidian 知识库。")
+        print("（在 ~/Documents、~/Desktop、~/ 下找含 raw 文件夹的 Obsidian 库）")
+        print("找到了但没识别？手动指定：wiki-sync where <知识库路径>")
+        return None
 
-    print(f"找到 {len(candidates)} 个候选知识库：\n")
+    # 笔记多的（常用的）排前面
+    candidates = sorted(candidates, key=lambda v: -_vault_note_count(v))
+
+    print(f"在本地找到 {len(candidates)} 个 Obsidian 知识库：\n")
+    print(f"  {'序号':<4}{'笔记数':<8}路径")
     for i, v in enumerate(candidates, 1):
-        tag = " （LLM-WIKI）" if (v / ".llm-wiki").is_dir() else ""
-        print(f"  {i}. {v}{tag}")
+        print(f"  {i:<5}{_vault_note_count(v):<8}{v}")
 
-    chosen = candidates[0]
+    if not sys.stdin.isatty():
+        print("\n（当前非交互环境，没法选。请用： wiki-sync where <上面的路径>）")
+        return None
+
+    try:
+        ans = input(f"\n用哪个？输入序号 1-{len(candidates)}（直接回车取消）： ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if not ans.isdigit() or not (1 <= int(ans) <= len(candidates)):
+        print("已取消，没有改动。")
+        return None
+
+    chosen = candidates[int(ans) - 1]
+    cfg = load_config()
     cfg["vault"] = str(chosen)
     save_config(cfg)
-    print(f"\n✅ 已设为默认：{chosen}")
-    if len(candidates) > 1:
-        print("   不是这个？换一个：wiki-sync where <上面列出的路径>")
+    print(f"\n✅ 已设为你的知识库：{chosen}")
+    return chosen
+
+
+def cmd_detect(args):
+    """列出本地的 Obsidian 知识库，让你选一个用。"""
+    choose_vault()
 
 
 def cmd_config(args):
@@ -1177,14 +1271,19 @@ def _main_cli():
     parser = argparse.ArgumentParser(
         prog="wiki-sync",
         description="把 AI 对话记录同步进 Obsidian 知识库。\n\n"
-                    "在你用的 agent 里装一次，之后聊完自动同步：\n"
-                    "  wiki-sync install         装进当前 agent（自动识别）\n"
-                    "  wiki-sync install codex   装进指定 agent\n"
-                    "  wiki-sync                 手动同步一次历史对话\n"
-                    "  wiki-sync status          看哪些 agent 装了\n",
+                    "第一次用？跑这个，手把手带你设置：\n"
+                    "  wiki-sync setup\n\n"
+                    "之后日常：\n"
+                    "  wiki-sync install   装进当前 agent（聊完自动同步）\n"
+                    "  wiki-sync           手动同步一次历史对话\n"
+                    "  wiki-sync status    看哪些 agent 装了\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command")
+
+    # —— 新手指引 ——
+    p_setup = sub.add_parser("setup", help="新手指引：手把手走完全部设置")
+    p_setup.set_defaults(func=cmd_setup, source="all", file=None)
 
     # —— 常用命令 ——
     p_install = sub.add_parser("install", help="把自动同步装进 agent（claude / codex）")
@@ -1248,7 +1347,11 @@ def _main_cli():
 
     args = parser.parse_args()
     if not args.command:
-        cmd_sync(args)        # 不带参数 = 同步
+        # 第一次用（还没有任何配置）→ 自动进新手指引；否则 = 同步
+        if not CONFIG_PATH.exists():
+            cmd_setup(argparse.Namespace(source="all", file=None))
+        else:
+            cmd_sync(args)
         return
     args.func(args)
 

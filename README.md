@@ -36,7 +36,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ## 第一次用（三步）
 
 ```bash
-# 1) 自动找到你的 Obsidian 知识库
+# 1) 列出本地的 Obsidian 知识库，你选一个
 wiki-sync detect
 
 # 2) 装进你正在用的 agent（在 Claude Code / Codex 的终端里跑）
@@ -49,7 +49,7 @@ wiki-sync
 之后正常聊天即可，聊完自动同步。装好后建议重开一次 agent 让自动同步生效。
 
 > `detect` 会在 `~/Documents`、`~/Desktop`、`~/` 下找含 `raw` 文件夹的 Obsidian 库，
-> 带 `.llm-wiki` 标记的优先。找到多个会列出来，自动选第一个；不对就用 `wiki-sync where <路径>` 换。
+> 列成表格（带笔记数，方便你认出常用的那个），由**你输序号选**——工具不替你猜。
 
 ## 用法
 
@@ -87,12 +87,12 @@ wiki-sync list     # 先看看有哪些对话
 
 ### 知识库位置
 
-wiki-sync 会自动检索本地知识库（含 `raw` 文件夹的 Obsidian 库，`.llm-wiki` 标记的优先）。相关命令：
+wiki-sync 会检索本地的 Obsidian 知识库（含 `raw` 文件夹的库），列成表格让你挑。相关命令：
 
 ```bash
-wiki-sync detect              # 扫描本地、列出候选并设为默认
+wiki-sync detect              # 列出本地知识库（带笔记数），你输序号选
 wiki-sync where               # 看当前用的是哪个知识库
-wiki-sync where <vault 路径>   # 手动指定
+wiki-sync where <vault 路径>   # 直接指定
 ```
 
 ### 高级用法（一般用不到）
