@@ -35,7 +35,9 @@ case ":$PATH:" in
         ;;
 esac
 
-echo "用法："
-echo "  wiki-sync list       列出可导入的对话"
-echo "  wiki-sync import     导入最近一条对话"
+echo "三步上手："
+echo "  wiki-sync detect     找到你的 Obsidian 知识库"
+echo "  wiki-sync install    装进当前 agent（聊完自动同步）"
+echo "  wiki-sync            导入历史对话"
+echo ""
 echo "  wiki-sync --help     查看全部命令"
