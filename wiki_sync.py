@@ -637,18 +637,19 @@ def source_folder(vault, source):
 
 
 def write_sync_log(vault, entries, n_ok, n_skip, n_err):
-    """每次 sync 运行后，把本次结果追加到 wiki/log.md。
+    """每次 sync 运行后，把本次结果追加到 raw/wiki-sync-log.md。
 
-    第一性原理：一次同步就是一次操作，操作必留痕。
-      - 无条件写（wiki/ 不存在就创建），不再"目录不在就静默跳过"。
+    第一性原理：
+      - 操作必留痕：一次同步就是一次写库操作，无条件记录（空跑除外）。
+      - 归属自洽：日志是 wiki-sync 自己的产物，和它导入的对话一样放在 raw/ 下、
+        统一用 wiki-sync-* 命名；绝不写进 wiki/ 等用户亲手整理的区域。
       - 以"运行"为单位：一条带时间戳的汇总 + 本次导入清单，便于审计和排错。
-      - 本次没有任何实际导入/失败则不记，避免空跑产生噪声。
     """
     if n_ok == 0 and n_err == 0:
         return
-    wiki_dir = vault / "wiki"
-    wiki_dir.mkdir(parents=True, exist_ok=True)
-    log_path = wiki_dir / "log.md"
+    raw_dir = vault / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    log_path = raw_dir / "wiki-sync-log.md"
 
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = [f"## [{stamp}] sync | 新增 {n_ok}，跳过 {n_skip}，失败 {n_err}"]
@@ -657,7 +658,7 @@ def write_sync_log(vault, entries, n_ok, n_skip, n_err):
     block = "\n".join(lines) + "\n"
 
     if not log_path.exists():
-        log_path.write_text(f"# Research Log\n\n{block}", encoding="utf-8")
+        log_path.write_text(f"# wiki-sync 同步日志\n\n{block}", encoding="utf-8")
         return
     content = log_path.read_text(encoding="utf-8")
     if content.startswith("# "):

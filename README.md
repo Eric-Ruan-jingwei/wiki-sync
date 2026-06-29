@@ -161,7 +161,7 @@ wiki-sync source remove opencode
 
 ## 导入后的结构
 
-每个 agent 在 `raw/` 下有独立文件夹，里面**只放对话文件、不生成任何索引**（Obsidian 自己负责索引和搜索，手维护的索引只会过时添乱），**也不碰你 `wiki/sources/` 里整理好的主笔记**。每次同步会往 `wiki/log.md` 追加一条运行记录——一次同步就是一次写库操作，操作必留痕：
+wiki-sync 的产物**全部自包含在 `raw/` 下**、统一 `wiki-sync-*` 命名：每个 agent 一个文件夹、外加一份同步日志。文件夹里**只放对话、不生成任何索引**（Obsidian 自己负责索引和搜索，手维护的索引只会过时添乱），且**绝不写进 `wiki/` 等你亲手整理的区域**。每次同步会往 `raw/wiki-sync-log.md` 追加一条运行记录——一次同步就是一次写库操作，操作必留痕：
 
 ```
 你的 vault/
@@ -170,8 +170,8 @@ wiki-sync source remove opencode
 │   │   └── claude-<标题>.md      # 一个对话一个文件（frontmatter + 摘要 + 全文）
 │   ├── wiki-sync-codex/
 │   │   └── ...
-│   └── wiki-sync-opencode/      # 自定义 agent 也各自一个文件夹
-├── wiki/log.md                  # 每次同步追加一条运行记录（没有 wiki/ 会自动创建）
+│   ├── wiki-sync-opencode/      # 自定义 agent 也各自一个文件夹
+│   └── wiki-sync-log.md         # 每次同步追加一条运行记录（时间 + 新增/跳过/失败 + 清单）
 └── .wiki-sync/imported.json     # wiki-sync 自己的去重记录（不碰你的库结构）
 ```
 
