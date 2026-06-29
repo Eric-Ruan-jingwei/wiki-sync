@@ -36,6 +36,7 @@ from pathlib import Path
 CONFIG_PATH = Path.home() / ".config" / "wiki-sync" / "config.json"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+CLAUDE_LOCAL_SETTINGS_PATH = Path.home() / ".claude" / "settings.local.json"
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 
 # 来源 key → 显示名
@@ -742,17 +743,17 @@ CLAUDE_HOOK_CMD = f"{wiki_sync_cmd()} hook-run"
 
 
 def _load_claude_settings():
-    if CLAUDE_SETTINGS_PATH.exists():
+    if CLAUDE_LOCAL_SETTINGS_PATH.exists():
         try:
-            return json.loads(CLAUDE_SETTINGS_PATH.read_text(encoding="utf-8"))
+            return json.loads(CLAUDE_LOCAL_SETTINGS_PATH.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return {}
     return {}
 
 
 def _save_claude_settings(data):
-    CLAUDE_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CLAUDE_SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    CLAUDE_LOCAL_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CLAUDE_LOCAL_SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _claude_is_installed(settings=None):
@@ -764,7 +765,45 @@ def _claude_is_installed(settings=None):
     )
 
 
+def _migrate_from_main_settings():
+    """把 settings.json 里残留的 wiki-sync hook 删掉（已迁到 settings.local.json）。"""
+    if not CLAUDE_SETTINGS_PATH.exists():
+        return
+    try:
+        main = json.loads(CLAUDE_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+    stop = main.get("hooks", {}).get("Stop", [])
+    changed = False
+    new_groups = []
+    for group in stop:
+        kept = [h for h in group.get("hooks", []) if not str(h.get("command", "")).endswith("hook-run")]
+        if len(kept) != len(group.get("hooks", [])):
+            changed = True
+        if kept:
+            group["hooks"] = kept
+            new_groups.append(group)
+    if changed:
+        if new_groups:
+            main["hooks"]["Stop"] = new_groups
+        else:
+            del main["hooks"]["Stop"]
+        CLAUDE_SETTINGS_PATH.write_text(json.dumps(main, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _claude_ensure_hook():
+    """自愈：如果 hook 丢了，悄悄装回去。静默，不打印。"""
+    settings = _load_claude_settings()
+    if not _claude_is_installed(settings):
+        settings.setdefault("hooks", {}).setdefault("Stop", []).append(
+            {"hooks": [{"type": "command", "command": CLAUDE_HOOK_CMD}]}
+        )
+        _save_claude_settings(settings)
+
+
 def _claude_install():
+    # 先清理旧位置 settings.json 里可能残留的 hook（迁移到 settings.local.json）
+    _migrate_from_main_settings()
     settings = _load_claude_settings()
     if _claude_is_installed(settings):
         print("✅ Claude Code 已经装好了，无需重复。")
@@ -799,6 +838,7 @@ def _claude_uninstall():
 
 def _hook_run():
     """Claude Code Stop 钩子调用：从 stdin 读事件，同步当前对话。静默。"""
+    _claude_ensure_hook()
     try:
         event = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
