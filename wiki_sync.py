@@ -636,27 +636,35 @@ def source_folder(vault, source):
     return vault / "raw" / f"wiki-sync-{source}"
 
 
-def update_log(vault, source, title):
-    """把导入操作记到 LLM-WIKI 的活动日志 wiki/log.md（仅在 wiki/ 已存在时）。"""
-    wiki_dir = vault / "wiki"
-    if not wiki_dir.is_dir():
+def write_sync_log(vault, entries, n_ok, n_skip, n_err):
+    """每次 sync 运行后，把本次结果追加到 wiki/log.md。
+
+    第一性原理：一次同步就是一次操作，操作必留痕。
+      - 无条件写（wiki/ 不存在就创建），不再"目录不在就静默跳过"。
+      - 以"运行"为单位：一条带时间戳的汇总 + 本次导入清单，便于审计和排错。
+      - 本次没有任何实际导入/失败则不记，避免空跑产生噪声。
+    """
+    if n_ok == 0 and n_err == 0:
         return
+    wiki_dir = vault / "wiki"
+    wiki_dir.mkdir(parents=True, exist_ok=True)
     log_path = wiki_dir / "log.md"
-    today = date.today().isoformat()
-    entry = f"- 导入 {source_label(source)} 对话: {title}"
+
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [f"## [{stamp}] sync | 新增 {n_ok}，跳过 {n_skip}，失败 {n_err}"]
+    for source, title in entries:
+        lines.append(f"- {source_label(source)}: {title}")
+    block = "\n".join(lines) + "\n"
+
     if not log_path.exists():
-        log_path.write_text(f"# Research Log\n\n## {today}\n\n{entry}\n", encoding="utf-8")
+        log_path.write_text(f"# Research Log\n\n{block}", encoding="utf-8")
         return
     content = log_path.read_text(encoding="utf-8")
-    header = f"## {today}"
-    if header in content:
-        idx = content.index(header) + len(header)
-        content = content[:idx] + "\n\n" + entry + content[idx:]
-    elif content.startswith("# "):
+    if content.startswith("# "):
         nl = content.index("\n")
-        content = content[:nl + 1] + f"\n## {today}\n\n{entry}\n" + content[nl + 1:]
+        content = content[:nl + 1] + "\n" + block + content[nl + 1:]
     else:
-        content = f"## {today}\n\n{entry}\n" + content
+        content = block + "\n" + content
     log_path.write_text(content, encoding="utf-8")
 
 
@@ -685,8 +693,6 @@ def import_conversation(vault, conv, force=False):
         "importedAt": datetime.now().isoformat(),
     }
     save_imported(vault, imported)
-    if is_new:        # 同一对话反复更新（force）时不重复记日志
-        update_log(vault, conv["source"], title)
     return "ok", f"已导入: {title}"
 
 
@@ -990,8 +996,11 @@ def _require_vault():
 def _run_import(vault, targets, force=False, quiet_skips=False):
     """导入一批对话并打印结果汇总。"""
     n_ok = n_skip = n_err = 0
+    imported_entries = []
     for e in targets:
         status, msg = import_conversation(vault, e, force=force)
+        if status == "ok":
+            imported_entries.append((e["source"], oneline(e.get("title") or "Untitled", 120)))
         if status == "skipped" and quiet_skips:
             n_skip += 1
             continue
@@ -1001,6 +1010,7 @@ def _run_import(vault, targets, force=False, quiet_skips=False):
         n_skip += status == "skipped"
         n_err += status == "error"
     print(f"\n完成：新导入 {n_ok}，已存在 {n_skip}，失败 {n_err}")
+    write_sync_log(vault, imported_entries, n_ok, n_skip, n_err)
 
 
 def cmd_sync(args):
