@@ -636,26 +636,11 @@ def source_folder(vault, source):
     return vault / "raw" / f"wiki-sync-{source}"
 
 
-def write_sync_log(vault, entries, n_ok, n_skip, n_err):
-    """每次 sync 运行后，把本次结果追加到 raw/wiki-sync-log.md。
-
-    第一性原理：
-      - 操作必留痕：一次同步就是一次写库操作，无条件记录（空跑除外）。
-      - 归属自洽：日志是 wiki-sync 自己的产物，和它导入的对话一样放在 raw/ 下、
-        统一用 wiki-sync-* 命名；绝不写进 wiki/ 等用户亲手整理的区域。
-      - 以"运行"为单位：一条带时间戳的汇总 + 本次导入清单，便于审计和排错。
-    """
-    if n_ok == 0 and n_err == 0:
-        return
+def _append_log_block(vault, block):
+    """把一段日志块插到 raw/wiki-sync-log.md 标题之后（最新在上）。"""
     raw_dir = vault / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     log_path = raw_dir / "wiki-sync-log.md"
-
-    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    lines = [f"## [{stamp}] sync | 新增 {n_ok}，跳过 {n_skip}，失败 {n_err}"]
-    for source, title in entries:
-        lines.append(f"- {source_label(source)}: {title}")
-    block = "\n".join(lines) + "\n"
 
     if not log_path.exists():
         log_path.write_text(f"# wiki-sync 同步日志\n\n{block}", encoding="utf-8")
@@ -667,6 +652,33 @@ def write_sync_log(vault, entries, n_ok, n_skip, n_err):
     else:
         content = block + "\n" + content
     log_path.write_text(content, encoding="utf-8")
+
+
+def write_sync_log(vault, entries, n_ok, n_skip, n_err):
+    """每次 sync 运行后，把本次结果追加到 raw/wiki-sync-log.md。
+
+    第一性原理：
+      - 操作必留痕：一次写库操作就记一条，无条件记录（空跑除外）。手动 sync 走这里，
+        自动钩子走 write_hook_log，两条路径都留痕。
+      - 归属自洽：日志是 wiki-sync 自己的产物，和它导入的对话一样放在 raw/ 下、
+        统一用 wiki-sync-* 命名；绝不写进 wiki/ 等用户亲手整理的区域。
+      - 以"运行"为单位：一条带时间戳的汇总 + 本次导入清单，便于审计和排错。
+    """
+    if n_ok == 0 and n_err == 0:
+        return
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [f"## [{stamp}] sync | 新增 {n_ok}，跳过 {n_skip}，失败 {n_err}"]
+    for source, title in entries:
+        lines.append(f"- {source_label(source)}: {title}")
+    _append_log_block(vault, "\n".join(lines) + "\n")
+
+
+def write_hook_log(vault, source, title, is_new):
+    """自动钩子每次往库里写对话后留一条痕：新增 or 更新。"""
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    action = "新增" if is_new else "更新"
+    block = f"## [{stamp}] hook | {action}\n- {source_label(source)}: {title}\n"
+    _append_log_block(vault, block)
 
 
 def import_conversation(vault, conv, force=False):
@@ -799,7 +811,12 @@ def _hook_run():
         return
     conv = claude_parse_file(transcript)
     if conv["messageCount"] >= DEFAULT_HOOK_MIN_MESSAGES:
-        import_conversation(vault, conv, force=True)
+        key = f"{conv['source']}:{conv.get('sessionId', '')}"
+        was_new = key not in load_imported(vault)
+        status, _ = import_conversation(vault, conv, force=True)
+        if status == "ok":
+            title = oneline(conv.get("title") or "Untitled", 120)
+            write_hook_log(vault, conv["source"], title, was_new)
 
 
 # ---- Codex：config.toml 的 notify（单槽位，做接力保留原有）----
