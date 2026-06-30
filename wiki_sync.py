@@ -12,6 +12,7 @@ wiki-sync — 把 AI Agent 的对话记录导入 Obsidian LLM-WIKI 知识库。
     wiki-sync import --session <id>          导入指定对话
     wiki-sync import --all                   导入全部对话
     wiki-sync import --source chatgpt --file <export.json>
+    wiki-sync repair                         重建对话文件，补回被同名覆盖丢失的对话
     wiki-sync config --vault <path>          设置 LLM-WIKI vault 路径
     wiki-sync config                         查看当前配置
     wiki-sync hook install                   开启 Claude Code 对话自动同步
@@ -20,14 +21,21 @@ wiki-sync — 把 AI Agent 的对话记录导入 Obsidian LLM-WIKI 知识库。
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime, date
 from pathlib import Path
+
+try:
+    import fcntl  # Unix 文件锁；Windows 上没有，退化为无锁（本工具面向 mac/Unix）
+except ImportError:  # pragma: no cover
+    fcntl = None
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -87,8 +95,7 @@ def load_config():
 
 
 def save_config(cfg):
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write(CONFIG_PATH, json.dumps(cfg, ensure_ascii=False, indent=2))
 
 
 def is_vault(p):
@@ -97,26 +104,57 @@ def is_vault(p):
     return (p / ".obsidian").is_dir() and (p / "raw").is_dir()
 
 
+# 扫描知识库时的边界：深度上限 + 明确跳过的大目录。
+# 第一性原理：我们只是找几个 Obsidian 库，没必要把整个 $HOME（Library、
+# node_modules、缓存…）翻一遍。glob("**/raw") 会无差别下钻、可能卡几十秒到几分钟，
+# 这里改成「边走边剪枝」的有界遍历。
+SCAN_MAX_DEPTH = 4
+SCAN_SKIP_DIRS = {
+    "node_modules", "Library", "Applications", ".git", ".Trash", ".cache",
+    "__pycache__", ".venv", "venv", "site-packages", "dist", "build",
+    ".next", ".gradle", ".m2", ".cargo", ".rustup", ".npm", "vendor",
+}
+
+
 def scan_vaults():
-    """扫描本地常见位置，返回所有候选知识库路径（去重、按路径排序）。"""
-    search_roots = [
-        Path.home() / "Documents",
-        Path.home() / "Desktop",
-        Path.home(),
-    ]
-    found = []
-    seen = set()
-    for root in search_roots:
+    """扫描本地常见位置，返回所有候选知识库路径（去重、按路径排序）。
+
+    有界 + 剪枝：深度不超过 SCAN_MAX_DEPTH，跳过隐藏目录与已知大目录，
+    命中一个库就不再往库内部下钻。多个根目录共享 visited，避免 $HOME 把
+    Documents/Desktop 重复走一遍。
+    """
+    roots = [Path.home() / "Documents", Path.home() / "Desktop", Path.home()]
+    found, seen, visited = [], set(), set()
+    for root in roots:
         if not root.is_dir():
             continue
-        # 以 raw 文件夹为线索：找含 raw 的 Obsidian 仓库
-        for marker in root.glob("**/raw"):
-            vault = marker.parent
-            if len(vault.relative_to(root).parts) > 4:
+        stack = [(root, 0)]
+        while stack:
+            d, depth = stack.pop()
+            rp = str(d)
+            if rp in visited:
                 continue
-            if is_vault(vault) and vault not in seen:
-                seen.add(vault)
-                found.append(vault)
+            visited.add(rp)
+            if is_vault(d):
+                if d not in seen:
+                    seen.add(d)
+                    found.append(d)
+                continue  # 命中库后不再往库内部下钻
+            if depth >= SCAN_MAX_DEPTH:
+                continue
+            try:
+                entries = list(os.scandir(d))
+            except OSError:
+                continue
+            for e in entries:
+                try:
+                    if not e.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                if e.name.startswith(".") or e.name in SCAN_SKIP_DIRS:
+                    continue
+                stack.append((Path(e.path), depth + 1))
     return sorted(found, key=lambda p: str(p))
 
 
@@ -180,6 +218,61 @@ def finalize_conv(conv):
     if conv["title"] is None:
         conv["title"] = oneline(conv.get("firstPrompt") or "Untitled", 60)
     return conv
+
+
+def conv_key(conv):
+    """一个会话的稳定唯一身份：source:sessionId。
+
+    去重表、文件名、是否已导入的判断，全都从这一处口径派生，
+    确保「同一会话」与「不同会话」的判断永远一致，不会再各算各的。
+    """
+    return f"{conv['source']}:{conv.get('sessionId', '')}"
+
+
+def conv_filename(conv):
+    """会话 → 落盘文件名。
+
+    第一性原理：文件名必须由会话的稳定身份唯一决定，否则两个不同会话
+    只要标题相同就会写同一个文件、互相覆盖（实测曾导致大量对话丢失）。
+    做法：可读的 标题 slug + 身份哈希后 8 位。
+      - 不同会话 → 哈希不同 → 文件不同（绝不碰撞）。
+      - 同一会话重复导入 → 哈希相同 → 覆盖自己那一份（就是想要的「更新」）。
+    """
+    title = oneline(conv.get("title") or "Untitled", 120)
+    slug = f"{conv['source']}-{slugify(title)}"
+    sid = hashlib.sha1(conv_key(conv).encode("utf-8")).hexdigest()[:8]
+    return f"{slug}-{sid}.md"
+
+
+def _atomic_write(path, text):
+    """原子写：先写临时文件再 rename，避免并发/中断把文件写坏。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+@contextmanager
+def _vault_lock(vault):
+    """对单个知识库加排他文件锁，串行化对 imported.json / 日志的读-改-写。
+
+    注意：同一进程内不可嵌套获取（flock 会自死锁），调用点已确保不嵌套。
+    """
+    if fcntl is None:
+        yield
+        return
+    lock_dir = Path(vault) / ".wiki-sync"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_dir / ".lock"), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +483,22 @@ FORMAT_PARSERS = {
 # 适配器：ChatGPT（官方数据导出 conversations.json）
 # ---------------------------------------------------------------------------
 
+def _ts_to_iso(ts):
+    """Unix 时间戳 → ISO 字符串；遇到坏值（超大/负/非数）返回 None，不抛异常。"""
+    try:
+        return datetime.fromtimestamp(ts).isoformat()
+    except (ValueError, OSError, OverflowError, TypeError):
+        return None
+
+
+def _ts_num(ts):
+    """把时间戳安全转成可排序的数；非数返回 0，避免 str 与 int 比较报错。"""
+    try:
+        return float(ts)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def chatgpt_parse_export(export_path, source="chatgpt"):
     """解析 ChatGPT 导出的 conversations.json → list[conv]。"""
     try:
@@ -406,12 +515,10 @@ def chatgpt_parse_export(export_path, source="chatgpt"):
         conv_id = item.get("id") or item.get("conversation_id") or ""
         conv = new_conv(source, conv_id, export_path)
         conv["title"] = item.get("title") or None
-        ct = item.get("create_time")
-        ut = item.get("update_time")
-        if ct:
-            conv["created"] = datetime.fromtimestamp(ct).isoformat()
-        if ut:
-            conv["modified"] = datetime.fromtimestamp(ut).isoformat()
+        if item.get("create_time"):
+            conv["created"] = _ts_to_iso(item["create_time"])
+        if item.get("update_time"):
+            conv["modified"] = _ts_to_iso(item["update_time"])
 
         # 从 mapping 里抽取消息，按 create_time 排序
         mapping = item.get("mapping", {}) or {}
@@ -429,7 +536,7 @@ def chatgpt_parse_export(export_path, source="chatgpt"):
             text = "\n".join(p for p in parts if isinstance(p, str)).strip()
             if not text or is_noise_text(text):
                 continue
-            rows.append((msg.get("create_time") or 0, role, text))
+            rows.append((_ts_num(msg.get("create_time")), role, text))
         rows.sort(key=lambda r: r[0])
         for _, role, text in rows:
             if role == "user" and conv["firstPrompt"] is None:
@@ -627,9 +734,7 @@ def load_imported(vault):
 
 
 def save_imported(vault, data):
-    f = _imported_path(vault)
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write(_imported_path(vault), json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def source_folder(vault, source):
@@ -638,21 +743,23 @@ def source_folder(vault, source):
 
 
 def _append_log_block(vault, block):
-    """把一段日志块插到 raw/wiki-sync-log.md 标题之后（最新在上）。"""
-    raw_dir = vault / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    log_path = raw_dir / "wiki-sync-log.md"
+    """把一段日志块插到 raw/wiki-sync-log.md 标题之后（最新在上）。
 
-    if not log_path.exists():
-        log_path.write_text(f"# wiki-sync 同步日志\n\n{block}", encoding="utf-8")
-        return
-    content = log_path.read_text(encoding="utf-8")
-    if content.startswith("# "):
-        nl = content.index("\n")
-        content = content[:nl + 1] + "\n" + block + content[nl + 1:]
-    else:
-        content = block + "\n" + content
-    log_path.write_text(content, encoding="utf-8")
+    读-改-写整段在库锁内完成，避免 Claude 的 Stop 钩子和 Codex 的 notify
+    并发时互相覆盖日志。
+    """
+    log_path = vault / "raw" / "wiki-sync-log.md"
+    with _vault_lock(vault):
+        if not log_path.exists():
+            _atomic_write(log_path, f"# wiki-sync 同步日志\n\n{block}")
+            return
+        content = log_path.read_text(encoding="utf-8")
+        if content.startswith("# "):
+            nl = content.index("\n")
+            content = content[:nl + 1] + "\n" + block + content[nl + 1:]
+        else:
+            content = block + "\n" + content
+        _atomic_write(log_path, content)
 
 
 def write_sync_log(vault, entries, n_ok, n_skip, n_err):
@@ -682,31 +789,52 @@ def write_hook_log(vault, source, title, is_new):
     _append_log_block(vault, block)
 
 
-def import_conversation(vault, conv, force=False):
-    """导入单个对话 → raw/wiki-sync-<source>/<slug>.md，返回 (status, message)。"""
-    key = f"{conv['source']}:{conv.get('sessionId', '')}"
-    imported = load_imported(vault)
-    is_new = key not in imported
-    if not is_new and not force:
-        return "skipped", f"已导入过，跳过: {imported[key].get('title', key)}"
+def _recorded_filename(record):
+    """从 imported.json 的一条记录还原它落盘的文件名。
+    新记录存 file；老记录（旧命名）只有 slug，按 <slug>.md 还原。"""
+    if not record:
+        return None
+    if record.get("file"):
+        return record["file"]
+    if record.get("slug"):
+        return f"{record['slug']}.md"
+    return None
 
+
+def _conv_imported(vault, conv, imported):
+    """会话是否已真正在库里——既要 ledger 有记录，文件也得确实还在。
+    文件被误删/丢失时返回 False，让同步把它补回来（自愈）。"""
+    name = _recorded_filename(imported.get(conv_key(conv)))
+    if not name:
+        return False
+    return (source_folder(vault, conv["source"]) / name).exists()
+
+
+def import_conversation(vault, conv, force=False):
+    """导入单个对话 → raw/wiki-sync-<source>/<file>.md，返回 (status, message)。
+
+    文件名由会话身份唯一决定（见 conv_filename），不同会话绝不写同一个文件。
+    ledger 读-改-写在库锁内串行，避免并发丢更新。
+    """
     if not conv.get("messages"):
         return "error", "对话内容为空，跳过"
-
+    key = conv_key(conv)
     title = oneline(conv.get("title") or "Untitled", 120)
-    slug = f"{conv['source']}-{slugify(title)}"
+    with _vault_lock(vault):
+        imported = load_imported(vault)
+        if not force and _conv_imported(vault, conv, imported):
+            return "skipped", f"已导入过，跳过: {imported[key].get('title', key)}"
 
-    folder = source_folder(vault, conv["source"])
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / f"{slug}.md").write_text(build_conversation_markdown(conv), encoding="utf-8")
-
-    imported[key] = {
-        "title": title,
-        "slug": slug,
-        "source": conv["source"],
-        "importedAt": datetime.now().isoformat(),
-    }
-    save_imported(vault, imported)
+        fname = conv_filename(conv)
+        _atomic_write(source_folder(vault, conv["source"]) / fname,
+                      build_conversation_markdown(conv))
+        imported[key] = {
+            "title": title,
+            "file": fname,
+            "source": conv["source"],
+            "importedAt": datetime.now().isoformat(),
+        }
+        save_imported(vault, imported)
     return "ok", f"已导入: {title}"
 
 
@@ -752,8 +880,7 @@ def _load_claude_settings():
 
 
 def _save_claude_settings(data):
-    CLAUDE_LOCAL_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CLAUDE_LOCAL_SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write(CLAUDE_LOCAL_SETTINGS_PATH, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def _claude_is_installed(settings=None):
@@ -792,7 +919,13 @@ def _migrate_from_main_settings():
 
 
 def _claude_ensure_hook():
-    """自愈：如果 hook 丢了，悄悄装回去。静默，不打印。"""
+    """自愈：如果 hook 丢了，悄悄装回去。静默，不打印。
+
+    但绝不对抗用户：一旦用户显式卸载过（config 里 claude_hook_disabled），
+    就不再自愈——自愈只防意外丢失，不防用户主动关闭。
+    """
+    if load_config().get("claude_hook_disabled"):
+        return
     settings = _load_claude_settings()
     if not _claude_is_installed(settings):
         settings.setdefault("hooks", {}).setdefault("Stop", []).append(
@@ -802,6 +935,10 @@ def _claude_ensure_hook():
 
 
 def _claude_install():
+    # 安装即重新表达「要开启」的意图，清掉之前卸载留下的禁用标记。
+    cfg = load_config()
+    if cfg.pop("claude_hook_disabled", None) is not None:
+        save_config(cfg)
     # 先清理旧位置 settings.json 里可能残留的 hook（迁移到 settings.local.json）
     _migrate_from_main_settings()
     settings = _load_claude_settings()
@@ -828,6 +965,11 @@ def _claude_uninstall():
         if kept:
             group["hooks"] = kept
             new_groups.append(group)
+    # 记下「用户要关闭」的显式意图：否则自愈钩子会在下次对话结束时把自己装回来，
+    # 卸载形同虚设。装回去只能由 install 主动撤销这个标记。
+    cfg = load_config()
+    cfg["claude_hook_disabled"] = True
+    save_config(cfg)
     if removed:
         settings["hooks"]["Stop"] = new_groups
         _save_claude_settings(settings)
@@ -838,6 +980,9 @@ def _claude_uninstall():
 
 def _hook_run():
     """Claude Code Stop 钩子调用：从 stdin 读事件，同步当前对话。静默。"""
+    # 用户已显式卸载 → 即便当前会话还残留着旧钩子在调用，也不再同步、不再自愈。
+    if load_config().get("claude_hook_disabled"):
+        return
     _claude_ensure_hook()
     try:
         event = json.load(sys.stdin)
@@ -851,8 +996,7 @@ def _hook_run():
         return
     conv = claude_parse_file(transcript)
     if conv["messageCount"] >= DEFAULT_HOOK_MIN_MESSAGES:
-        key = f"{conv['source']}:{conv.get('sessionId', '')}"
-        was_new = key not in load_imported(vault)
+        was_new = not _conv_imported(vault, conv, load_imported(vault))
         status, _ = import_conversation(vault, conv, force=True)
         if status == "ok":
             title = oneline(conv.get("title") or "Untitled", 120)
@@ -875,6 +1019,15 @@ def _codex_read_notify(text):
         return None, None
     items = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
     return items, m
+
+
+def _is_wiki_notify(items):
+    """这个 notify 数组是不是 wiki-sync 自己的命令。
+
+    只看末位元素会漏判（如 [cmd, "notify-run", "x"]），导致接力时把自己又调一遍。
+    这里只要数组里含 notify-run 就认作我们的，安装去重、接力守卫统一用它。
+    """
+    return bool(items) and any(str(x).endswith("notify-run") for x in items)
 
 
 def _codex_install():
@@ -922,7 +1075,7 @@ def _codex_uninstall():
         return
     text = CODEX_CONFIG_PATH.read_text(encoding="utf-8")
     existing, m = _codex_read_notify(text)
-    if not existing or existing[-1:] != ["notify-run"]:
+    if not _is_wiki_notify(existing):
         print("（Codex 里没有 wiki-sync 的 notify，无需卸载。）")
         return
     cfg = load_config()
@@ -944,7 +1097,7 @@ def _codex_is_installed():
     if not CODEX_CONFIG_PATH.exists():
         return False
     existing, _ = _codex_read_notify(CODEX_CONFIG_PATH.read_text(encoding="utf-8"))
-    return bool(existing) and existing[-1:] == ["notify-run"]
+    return _is_wiki_notify(existing)
 
 
 def _notify_run():
@@ -960,9 +1113,9 @@ def _notify_run():
             conv = codex_parse_file(rollouts[0])
             if conv["messageCount"] >= DEFAULT_HOOK_MIN_MESSAGES:
                 import_conversation(vault, conv, force=True)
-    # 接力：调用用户原有的 notify
+    # 接力：调用用户原有的 notify（绝不接力到我们自己，否则会无限自调用）
     prev = load_config().get("codex_prev_notify")
-    if prev and prev[-1:] != ["notify-run"]:
+    if prev and not _is_wiki_notify(prev):
         try:
             subprocess.run([*prev, *passthrough], timeout=20)
         except (OSError, subprocess.SubprocessError):
@@ -1028,8 +1181,7 @@ def cmd_list(args):
 
     print(f"找到 {len(convs)} 个对话：\n")
     for i, e in enumerate(convs, 1):
-        key = f"{e['source']}:{e.get('sessionId', '')}"
-        mark = "✓ 已导入" if key in imported else "  未导入"
+        mark = "✓ 已导入" if (vault and _conv_imported(vault, e, imported)) else "  未导入"
         src = source_label(e["source"])
         print(f"  {i:2d}. [{mark}] [{src}] {oneline(e.get('title'), 42)}")
         print(f"        {fmt_date(e.get('modified') or e.get('created'))} · "
@@ -1078,13 +1230,73 @@ def cmd_sync(args):
     if not convs:
         print("没找到任何对话。")
         return
-    new = [c for c in convs if f"{c['source']}:{c.get('sessionId','')}" not in load_imported(vault)]
+    imported = load_imported(vault)
+    new = [c for c in convs if not _conv_imported(vault, c, imported)]
     print(f"知识库: {vault}")
     if not new:
         print(f"\n✅ 全部 {len(convs)} 个对话都已经同步过了，没有新的。")
         return
     print(f"发现 {len(new)} 个新对话，开始同步…\n")
     _run_import(vault, new, force=False, quiet_skips=True)
+
+
+def _prune_orphans(vault):
+    """删除 raw/wiki-sync-<source>/ 下、imported.json 已不再引用的遗留 .md。
+
+    只动 wiki-sync 自己生成的目录，按 ledger 记录的文件名做白名单——任何被某条
+    记录认领的文件都保留，绝不误删用户其它笔记，也不动 raw/wiki-sync-log.md。
+    """
+    imported = load_imported(vault)
+    keep = {}  # source -> {filename, ...}
+    for rec in imported.values():
+        name = _recorded_filename(rec)
+        if name:
+            keep.setdefault(rec.get("source"), set()).add(name)
+
+    removed = 0
+    raw = vault / "raw"
+    if not raw.is_dir():
+        return 0
+    for folder in raw.glob("wiki-sync-*"):
+        if not folder.is_dir():  # 跳过 raw/wiki-sync-log.md 这类文件
+            continue
+        source = folder.name[len("wiki-sync-"):]
+        allowed = keep.get(source, set())
+        for md in folder.glob("*.md"):
+            if md.name not in allowed:
+                try:
+                    md.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+    return removed
+
+
+def cmd_repair(args):
+    """重建知识库里的对话文件：统一为防碰撞命名，补回此前被同名覆盖的对话。
+
+    历史 bug：文件名只由标题决定，不同会话同名就互相覆盖，曾导致大量对话丢失。
+    repair 从原始记录（~/.claude、~/.codex 等）强制重导一遍——每个会话据其唯一身份
+    各得一个文件，被覆盖掉的会重新出现；再清掉旧命名留下的遗留文件。可反复运行（幂等）。
+    """
+    vault = _require_vault()
+    convs = discover_all("all")
+    print(f"知识库: {vault}")
+    if not convs:
+        print("没找到任何可重建的对话。")
+        return
+    print(f"发现 {len(convs)} 个对话，开始重建（统一命名、补回被同名覆盖的对话）…\n")
+    n_ok = n_err = 0
+    for c in convs:
+        status, msg = import_conversation(vault, c, force=True)
+        if status == "ok":
+            n_ok += 1
+        elif status == "error":
+            n_err += 1
+            print(f"  ❌ {msg}")
+    removed = _prune_orphans(vault)
+    print(f"\n重建完成：写入 {n_ok}，失败 {n_err}，清理旧命名遗留文件 {removed} 个。")
+    print("现在每个会话都是独立文件，按身份命名，不会再互相覆盖。")
 
 
 def cmd_import(args):
@@ -1349,6 +1561,10 @@ def _main_cli():
 
     p_sync = sub.add_parser("sync", help="手动同步所有新对话（= 直接运行 wiki-sync）")
     p_sync.set_defaults(func=cmd_sync)
+
+    p_repair = sub.add_parser(
+        "repair", help="重建对话文件：修复同名覆盖、补回被覆盖丢失的对话")
+    p_repair.set_defaults(func=cmd_repair, source="all", file=None)
 
     p_list = sub.add_parser("list", help="看看有哪些对话")
     p_list.add_argument("--source", default="all", help="只看某个来源")
